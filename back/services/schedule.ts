@@ -11,6 +11,7 @@ export default class ScheduleService {
   constructor(@Inject('logger') private logger: winston.Logger) {}
 
   async generateSchedule({ _id = '', command, name, schedule }: Crontab) {
+    this.logger.info(`目前任务数: ${this.scheduleStacks.size}`);
     this.logger.info(
       '[创建定时任务]，任务ID: %s，cron: %s，任务名: %s，执行命令: %s',
       _id,

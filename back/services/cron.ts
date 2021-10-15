@@ -10,6 +10,7 @@ import { getFileContentByName } from '../config/util';
 import PQueue from 'p-queue';
 import { promises, existsSync } from 'fs';
 import { promisify } from 'util';
+import ScheduleService from './schedule';
 
 @Service()
 export default class CronService {
@@ -19,7 +20,10 @@ export default class CronService {
     concurrency: parseInt(process.env.MaxConcurrentNum as string) || 5,
   });
 
-  constructor(@Inject('logger') private logger: winston.Logger) {
+  constructor(
+    @Inject('logger') private logger: winston.Logger,
+    private scheduleService: ScheduleService,
+  ) {
     this.cronDb.loadDatabase((err) => {
       if (err) throw err;
     });
@@ -42,7 +46,7 @@ export default class CronService {
     tab.created = new Date().valueOf();
     tab.saved = false;
     const doc = await this.insert(tab);
-    await this.set_crontab(this.isSixCron(doc));
+    await this.set_crontab(doc);
     return doc;
   }
 
@@ -64,7 +68,7 @@ export default class CronService {
     const tab = new Crontab({ ...doc, ...other });
     tab.saved = false;
     const newDoc = await this.updateDb(tab);
-    await this.set_crontab(this.isSixCron(newDoc));
+    await this.set_crontab(doc);
     return newDoc;
   }
 
@@ -126,7 +130,12 @@ export default class CronService {
         { _id: { $in: ids } },
         { multi: true },
         async (err) => {
-          await this.set_crontab(true);
+          for (const id of ids) {
+            await this.scheduleService.cancelSchedule({
+              _id: id,
+              name: id,
+            } as any);
+          }
           resolve();
         },
       );
@@ -321,9 +330,12 @@ export default class CronService {
       this.cronDb.update(
         { _id: { $in: ids } },
         { $set: { isDisabled: 1 } },
-        { multi: true },
-        async (err) => {
-          await this.set_crontab(true);
+        { multi: true, returnUpdatedDocs: true },
+        async (err, num, docs: any) => {
+          for (const doc of docs) {
+            await this.scheduleService.cancelSchedule(doc);
+            await this.scheduleService.generateSchedule(doc);
+          }
           resolve();
         },
       );
@@ -335,9 +347,12 @@ export default class CronService {
       this.cronDb.update(
         { _id: { $in: ids } },
         { $set: { isDisabled: 0 } },
-        { multi: true },
-        async (err) => {
-          await this.set_crontab(true);
+        { multi: true, returnUpdatedDocs: true },
+        async (err, num, docs: any) => {
+          for (const doc of docs) {
+            await this.scheduleService.cancelSchedule(doc);
+            await this.scheduleService.generateSchedule(doc);
+          }
           resolve();
         },
       );
@@ -385,33 +400,9 @@ export default class CronService {
     return crontab_job_string;
   }
 
-  private async set_crontab(needReloadSchedule: boolean = false) {
-    const tabs = await this.crontabs();
-    var crontab_string = '';
-    tabs.forEach((tab) => {
-      const _schedule = tab.schedule && tab.schedule.split(/ +/);
-      if (tab.isDisabled === 1 || _schedule.length !== 5) {
-        crontab_string += '# ';
-        crontab_string += tab.schedule;
-        crontab_string += ' ';
-        crontab_string += this.make_command(tab);
-        crontab_string += '\n';
-      } else {
-        crontab_string += tab.schedule;
-        crontab_string += ' ';
-        crontab_string += this.make_command(tab);
-        crontab_string += '\n';
-      }
-    });
-
-    this.logger.silly(crontab_string);
-    fs.writeFileSync(config.crontabFile, crontab_string);
-
-    execSync(`crontab ${config.crontabFile}`);
-    if (needReloadSchedule) {
-      exec(`pm2 reload schedule`);
-    }
-    this.cronDb.update({}, { $set: { saved: true } }, { multi: true });
+  private async set_crontab(cron: Crontab) {
+    await this.scheduleService.cancelSchedule(cron);
+    await this.scheduleService.generateSchedule(cron);
   }
 
   private reload_db() {
@@ -452,9 +443,5 @@ export default class CronService {
         }
       });
     });
-  }
-
-  public autosave_crontab() {
-    return this.set_crontab();
   }
 }
